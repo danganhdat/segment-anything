@@ -53,9 +53,16 @@ class Sam(nn.Module):
     @torch.no_grad()
     def forward(
         self,
-        batched_input: List[Dict[str, Any]],
-        multimask_output: bool,
-    ) -> List[Dict[str, torch.Tensor]]:
+        batched_input=None,
+        multimask_output=None,
+        custom_forward=False,
+        run_encoder_only=False,
+        run_decoder_only=False,
+        features_sam=None,
+        transformed_image=None,
+        original_image_size=None,
+        point_coords=None, 
+        point_labels=None):
         """
         Predicts masks end-to-end from provided images and prompts.
         If prompts are not known in advance, using SamPredictor is
@@ -94,6 +101,87 @@ class Sam(nn.Module):
                 shape BxCxHxW, where H=W=256. Can be passed as mask input
                 to subsequent iterations of prediction.
         """
+        
+        ###
+        if run_encoder_only:
+          self.original_size = original_image_size
+          self.input_size = tuple(transformed_image.shape[-2:])
+          input_image = self.preprocess(transformed_image)
+          features_sam = self.image_encoder(input_image)
+          return features_sam
+          
+        if run_decoder_only and features_sam is not None:
+          
+          self.original_size = original_image_size
+          self.input_size = (1024,1024)
+          
+          if point_coords is not None:
+            points = (point_coords, point_labels)
+          else:
+              points = None
+          
+          # Embed prompts
+          sparse_embeddings, dense_embeddings = self.prompt_encoder(
+              points=points,
+              boxes=None,
+              masks=None,
+          )
+
+          # Predict masks
+          low_res_masks, iou_predictions = self.mask_decoder(
+              image_embeddings=features_sam,
+              image_pe=self.prompt_encoder.get_dense_pe(),
+              sparse_prompt_embeddings=sparse_embeddings,
+              dense_prompt_embeddings=dense_embeddings,
+              multimask_output=True,
+          )
+
+          # Upscale the masks to the original image resolution
+          masks = self.postprocess_masks(low_res_masks, self.input_size, self.original_size)
+
+          masks = masks > self.mask_threshold
+
+          return masks, iou_predictions, low_res_masks
+        
+        ###
+        if custom_forward:
+          self.original_size = original_image_size
+          self.input_size = tuple(transformed_image.shape[-2:])
+          input_image = self.preprocess(transformed_image)
+          self.features = self.image_encoder(input_image)
+                    
+          if point_coords is not None:
+            points = (point_coords, point_labels)
+          else:
+              points = None
+
+          # Embed prompts
+          sparse_embeddings, dense_embeddings = self.prompt_encoder(
+              points=points,
+              boxes=None,
+              masks=None,
+          )
+          
+          # Predict masks
+          low_res_masks, iou_predictions = self.mask_decoder(
+              image_embeddings=self.features,
+              image_pe=self.prompt_encoder.get_dense_pe(),
+              sparse_prompt_embeddings=sparse_embeddings,
+              dense_prompt_embeddings=dense_embeddings,
+              multimask_output=True,
+          )
+
+          # Upscale the masks to the original image resolution
+          masks = self.postprocess_masks(low_res_masks, self.input_size, self.original_size)
+
+          masks = masks > self.mask_threshold
+
+          return masks, iou_predictions, low_res_masks
+        ###
+        
+        
+        
+        
         input_images = torch.stack([self.preprocess(x["image"]) for x in batched_input], dim=0)
         image_embeddings = self.image_encoder(input_images)
 
